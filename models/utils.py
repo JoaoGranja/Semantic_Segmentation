@@ -1,9 +1,60 @@
+import tensorflow as tf
 from tensorflow.keras import Model, Sequential
 from tensorflow.keras.layers import Cropping2D, Conv2DTranspose, BatchNormalization, Dropout, ReLU, Activation
-from tensorflow.keras.layers import AveragePooling2D, Conv2D, Lambda
+from tensorflow.keras.layers import AveragePooling2D, Conv2D, Lambda, DepthwiseConv2D, Add
 import keras.backend as K
 import numpy as np
 
+
+def _make_divisible(v, divisor, min_value=None):
+    if min_value is None:
+        min_value = divisor
+    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    # Make sure that round down does not go down by more than 10%.
+    if new_v < 0.9 * v:
+        new_v += divisor
+    return new_v
+
+def _inverted_res_block(inputs, expansion, stride, alpha, filters, block_id, skip_connection, rate=1):
+    in_channels = inputs.shape[-1]  # inputs._keras_shape[-1]
+    pointwise_conv_filters = int(filters * alpha)
+    pointwise_filters = _make_divisible(pointwise_conv_filters, 8)
+    x = inputs
+    prefix = 'expanded_conv_{}_'.format(block_id)
+    if block_id:
+        # Expand
+
+        x = Conv2D(expansion * in_channels, kernel_size=1, padding='same',
+                   use_bias=False, activation=None,
+                   name=prefix + 'expand')(x)
+        x = BatchNormalization(epsilon=1e-3, momentum=0.999,
+                               name=prefix + 'expand_BN')(x)
+        x = Activation(tf.nn.relu6, name=prefix + 'expand_relu')(x)
+    else:
+        prefix = 'expanded_conv_'
+    # Depthwise
+    x = DepthwiseConv2D(kernel_size=3, strides=stride, activation=None,
+                        use_bias=False, padding='same', dilation_rate=(rate, rate),
+                        name=prefix + 'depthwise')(x)
+    x = BatchNormalization(epsilon=1e-3, momentum=0.999,
+                           name=prefix + 'depthwise_BN')(x)
+
+    x = Activation(tf.nn.relu6, name=prefix + 'depthwise_relu')(x)
+
+    # Project
+    x = Conv2D(pointwise_filters,
+               kernel_size=1, padding='same', use_bias=False, activation=None,
+               name=prefix + 'project')(x)
+    x = BatchNormalization(epsilon=1e-3, momentum=0.999,
+                           name=prefix + 'project_BN')(x)
+
+    if skip_connection:
+        return Add(name=prefix + 'add')([inputs, x])
+
+    # if in_channels == pointwise_filters and stride == 1:
+    #    return Add(name='res_connect_' + str(block_id))([inputs, x])
+
+    return x
 
 def pool_block(feats, pool_factor):
 

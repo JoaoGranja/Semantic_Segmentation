@@ -22,5 +22,8 @@ def make_model(network, input_shape, output_channels):
     elif network == 'mobileNetV2_segnet':
         from models.models import mobileNetV2_segnet
         return mobileNetV2_segnet(input_shape, output_channels) 
+    elif network == 'Deeplabv3':
+        from models.models import Deeplabv3
+        return Deeplabv3(input_shape, output_channels) 
     else:
         raise ValueError('unknown network ' + network)
