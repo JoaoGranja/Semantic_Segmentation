@@ -1,4 +1,4 @@
-import os
+import os, tensorflow
 import numpy as np
 import keras.backend as K
 import tensorflow as tf
@@ -279,8 +279,8 @@ def mobilenet_pspnet(input_shape, output_channels):
     input_width=input_shape[1]
     channels=input_shape[2]
 
-    #assert input_height % 192 == 0
-    #assert input_width % 192 == 0
+    assert input_height % 192 == 0
+    assert input_width % 192 == 0
 
     img_input, levels = get_mobilenet_encoder(
         input_height=input_height,  input_width=input_width, channels=channels)
@@ -298,17 +298,15 @@ def mobilenet_pspnet(input_shape, output_channels):
 
     o = Concatenate(axis=-1)(pool_outs)
 
-    o = Conv2D(512, (1, 1), data_format='channels_last', use_bias=False , name="seg_feats" )(o)
+    o = Conv2D(512, (3, 3), strides=(1, 1), padding="same", data_format='channels_last', use_bias=False , name="seg_feats" )(o)
     o = BatchNormalization()(o)
     o = Activation('relu')(o)
 
-    o = Conv2D(output_channels, (3, 3), data_format='channels_last',
-               padding='same')(o)
+    o = Dropout(0.1)(o)
 
-    outputs = Lambda(lambda x: K.resize_images(x,height_factor=32,width_factor=32,
-    data_format='channels_last', interpolation='bilinear'))(o)
-
-    model = Model(inputs=inputs, outputs=outputs, name="mobilenet_pspnet")
+    o = Conv2D(output_channels, (1, 1), strides=(1, 1), data_format='channels_last')(o)
+    outputs = Lambda(lambda x: tensorflow.image.resize(x, [input_shape[0], input_shape[1]]))(o)
+    model = Model(inputs=img_input, outputs=outputs, name="mobilenet_pspnet")
     return model
 
 def mobileNetV2_pspnet(input_shape, output_channels):
@@ -359,17 +357,89 @@ def mobileNetV2_pspnet(input_shape, output_channels):
 
     o = Concatenate(axis=-1)(pool_outs)
 
-    o = Conv2D(512, (1, 1), data_format='channels_last', use_bias=False , name="seg_feats" )(o)
+    o = Conv2D(512, (3, 3), strides=(1, 1), padding="same", data_format='channels_last', use_bias=False , name="seg_feats" )(o)
     o = BatchNormalization()(o)
     o = Activation('relu')(o)
-
-    o = Conv2D(output_channels, (3, 3), data_format='channels_last',
-               padding='same')(o)
-
-    outputs = Lambda(lambda x: K.resize_images(x,height_factor=32,width_factor=32,
-    data_format='channels_last', interpolation='bilinear'))(o)
+    o = Dropout(0.1)(o)
+    o = Conv2D(output_channels, (1, 1), strides=(1, 1), data_format='channels_last')(o)
+    outputs = Lambda(lambda x: tensorflow.image.resize(x, [input_shape[0], input_shape[1]]))(o)
 
     model = Model(inputs=img_input, outputs=outputs, name="mobileNetV2_pspnet")
+    return model
+
+
+def mobileNetV2_fcn_8(input_shape, output_channels):
+
+    input_height=input_shape[0]
+    input_width=input_shape[1]
+    channels=input_shape[2]
+
+    #Build the encoder
+    base_model = MobileNetV2(
+                    include_top=False,
+                    weights="imagenet",  # Load weights pre-trained on ImageNet.
+                    input_shape=input_shape,
+    )  # Do not include the ImageNet classifier at the top.
+
+    # Use the activations of these layers
+    layer_names = [
+      'block_1_expand_relu',   # 64x64
+      'block_3_expand_relu',   # 32x32
+      'block_6_expand_relu',   # 16x16
+      'block_13_expand_relu',  # 8x8
+      'block_16_project',      # 4x4
+    ] 
+
+    base_models_output = [base_model.get_layer(name).output for name in layer_names]
+    encoder = Model(base_model.input, base_models_output, name="encoder")
+
+    # Freeze the base_model
+    encoder.trainable = False
+
+    #Build the model
+    img_input = Input(shape=input_shape)
+    #x = data_augmentation(img_input)
+    x = img_input
+
+    # Downsampling through the model
+    levels = encoder(x, training=False)
+
+    [f1, f2, f3, f4, f5] = levels
+
+    o = f5
+
+    o = (Conv2D(4096, (7, 7), activation='relu',
+                padding='same', data_format='channels_last'))(o)
+    o = Dropout(0.5)(o)
+    o = (Conv2D(4096, (1, 1), activation='relu',
+                padding='same', data_format='channels_last'))(o)
+    o = Dropout(0.5)(o)
+
+    o = (Conv2D(output_channels,  (1, 1), kernel_initializer='he_normal',
+                data_format='channels_last'))(o)
+    o = Conv2DTranspose(output_channels, kernel_size=(4, 4),  strides=(
+        2, 2), use_bias=False, data_format='channels_last')(o)
+
+    o2 = f4
+    o2 = (Conv2D(output_channels,  (1, 1), kernel_initializer='he_normal',
+                 data_format='channels_last'))(o2)
+
+    o, o2 = crop(o, o2, img_input)
+
+    o = Add()([o, o2])
+
+    o = Conv2DTranspose(output_channels, kernel_size=(4, 4),  strides=(
+        2, 2), use_bias=False, data_format='channels_last')(o)
+    o2 = f3
+    o2 = (Conv2D(output_channels,  (1, 1), kernel_initializer='he_normal',
+                 data_format='channels_last'))(o2)
+    o2, o = crop(o2, o, img_input)
+    o = Add( name="seg_feats" )([o2, o])
+
+    outputs = Conv2DTranspose(output_channels, kernel_size=(8, 8),  strides=(
+        8, 8), use_bias=False, data_format='channels_last')(o)
+
+    model = Model(inputs=img_input, outputs=outputs, name="mobilenet_fcn_8")
     return model
 
 
@@ -418,8 +488,6 @@ def mobilenet_fcn_8(input_shape, output_channels):
 
     model = Model(inputs=img_input, outputs=outputs, name="mobilenet_fcn_8")
     return model
-
-
 
 def mobilenet_fcn_32(input_shape, output_channels):
 
